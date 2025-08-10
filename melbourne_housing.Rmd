@@ -1,0 +1,311 @@
+---
+title: "Modeling Real Estate Property Value with Real Estate Database of Melbourne, Australia"
+author: "Franklin Zhou and Diana Liang"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE}
+library(tidyverse)
+library(ISLR)
+library(glmnet)
+library(tree)
+library(maptree)
+library(randomForest)
+library(gbm)
+library(ROCR)
+library(dplyr)
+library(knitr)
+library(cv)
+library(olsrr)
+```
+# Introduction
+The value of a property in the real estate market may be contigent on many factors, such as location, size, access to amenity (e.g. parking spaces), and history. An accuracy prediction of the value of a property has significant commercial value both for the general public and the realtors. For buyers, the model serves as a tool to evaluate the competence of a deal; for realtors, the model assists the pricing strategies that maximizes the benefit of the clients. A group of generous realtors serving Melbourne Metropolitan Area of Australia, Tony Pino et al., has published a well-documented dataset of the properties on market dating from January 2016. Each observation in the dataset represents an on-market property in the Melbounrne Metropolitan Area from January 2016 to August 2018. The original dataset consists of 21 variables per observation, but we only focus on the following variables:
+
+* $\texttt{Rooms}$: Categorical, the number of bedrooms in the property.
+* $\texttt{Method}$: Categorical. The following levels are possible for $\texttt{Method}$: S, property sold (in an auction); SP, property sold prior to auction; SA, property sold after auction; PI, property "passed in" (i.e., in an auction, the top bid does not satisfy the seller and the property is "passed in" a private negotiation between the top bidder and the seller's realtor); VB, vendor bid (i.e., the bid is made on behalf of the seller).
+* $\texttt{Type}$: Categorical, type of the property. The following levels are possible for $\texttt{Type}$: $\texttt{h}$, house; $\texttt{u}$, unit; $\texttt{t}$, townhouse.
+* $\texttt{Landsize}$: Numerical, the size of the land of the property, in squared meters.
+* $\texttt{Propertycount}$: Numerical, the number of the properties in the suburb where the property is located in.
+* $\texttt{Bathroom}$: Categorical, the number of bathrooms in the property.
+* $\texttt{Car}$: Categorical, the number of car spots in the property.
+* $\texttt{Distance}$: Numerical, the distance from the property to the Melbourne central business district, in kilometers.
+* $\texttt{Price}$: Numerical, in Australian dollars (AU\$), the price of the property.
+
+Our question about this dataset is: **What determines the price of a property?** This question, as discussed above, has profound significance in the real estate world. The complete dataset was stored in a csv file named Melbourne_housing_FULL.csv. We input the data and name the unprocessed dataset as $\texttt{Melb}$. 
+```{r, echo=FALSE, results='hide', warning=FALSE}
+Melb <- read.csv("/Users/franklinzhou/Documents/General/Courses/Fall 2023/PSTAT 131/Melbourne Housing Market Project/Melbourne_housing_FULL.csv", header = TRUE)
+missing_by_var <- colSums(is.na(Melb))
+print(missing_by_var)
+```
+Some data conversion work needs to be done - we need to convert $\texttt{Propertycount}$ and $\texttt{Distance}$ from the character type to the numeric type. Also, the originally numeric $\texttt{Rooms}$, $\texttt{Bathroom}$, and $\texttt{Car}$ should be converted into the factor type.
+```{r, warning=FALSE}
+Melb$Propertycount <- as.numeric(Melb$Propertycount)
+Melb$Distance <- as.numeric(Melb$Distance)
+Melb$Rooms <- as.factor(Melb$Rooms)
+Melb$Bathroom <- as.factor(Melb$Bathroom)
+Melb$Car <- as.factor(Melb$Car)
+```
+Also, missing value can be a significant issue with the problem set. Parsing through the dataset, for example, there are 7,610 out of 34,857 observations missing a value of $\texttt{Price}$. Therefore, another critical task before any analysis work are to find a subset containing the ten variables we focus on and filter out any observation that has a missing value in the ten variables.
+```{r}
+Melb.housing <- Melb %>%
+  select(Rooms, Method, Type, Landsize, Propertycount, Bathroom, Car, Distance, Price)
+Melb.complete <- filter(Melb.housing, complete.cases(Melb.housing))
+attach(Melb.complete)
+```
+As a preliminary overview of the filtered dataset, there are a total of 17,701 complete observations.
+```{r, echo=FALSE, results='hide'}
+mean(Landsize)
+var(Landsize)
+mean(Propertycount)
+var(Propertycount)
+mean(Distance)
+var(Distance)
+mean(Price)
+var(Price)
+
+```
+```{r, echo=FALSE, warning=FALSE}
+stat.table <- read.csv("/Users/franklinzhou/Documents/General/Courses/Fall 2023/PSTAT 131/Melbourne Housing Market Project/stat.table.csv", header = TRUE)
+kable(stat.table, caption = "The statistics of the numeric variables")
+```
+
+A bar plot (Figure 1) with a density plot and a rug plot would also give a big picture about how the distribution of $\texttt{Price}$ is like. Based on both the bar plot and the summary statistics, the prices of the listings are more concentrated around AU\$1,000,000. There are still a few listings that have a extraordinarily high listed value (for example, > AU\$6,000,000).\
+```{r, echo=FALSE, warning=FALSE}
+ggplot(Melb.complete, aes(x = Price)) + 
+  geom_histogram(aes(y = after_stat(density)), binwidth = 150000, fill = "blue", color = "white", alpha = 0.7) +
+  labs(caption = 'Figure 1. Histogram of Prices of Properties in Melbourne') +
+  ylab('Probability') +
+  xlab('Price') +
+  geom_density(color = "red") +
+  geom_rug(color = "black")
+```
+To get some instinct in how $\texttt{Price}$ is related to other factors, we take $\texttt{Rooms}$ as an example to create a box plot (Figure 2).\
+```{r, echo=FALSE, warning=FALSE}
+ggplot(Melb.complete, aes(x = Rooms, y = Price)) +
+  geom_boxplot(fill = "white", color = "black", outlier.color = "red", na.rm=TRUE) +
+  labs(caption = 'Figure 2a. A Comparison of Prices of Properties in Merbourne by Number of Bedrooms') + 
+  ylab('Price') +
+  xlab('Number of Bedrooms')
+```
+What we find surprising is that the method a property is sold can also play a role in determining the property's price. This can be illustrated by Figure 2b, a box plot of $\texttt{Price}$ against $\texttt{Method}$.\
+```{r, echo=FALSE, warning=FALSE}
+ggplot(Melb.complete, aes(x = Method, y = Price)) +
+  geom_boxplot(fill = "white", color = "black", outlier.color = "red", na.rm=TRUE) +
+  labs(caption = 'Figure 2b. A Comparison of Prices of Properties in Merbourne by Method of Transaction') + 
+  ylab('Price') +
+  xlab('Method of Transaction')
+```
+In Figure 2a, we can, indeed, observe some relationship between $\texttt{Price}$ and $\texttt{Rooms}$, but the relationship is far from straightforward. Plotting against other variables like $\texttt{Method}$, $\texttt{Price}$ exhibit the same behavior. Hence, determining the true relationship between $\texttt{Price}$ and the other variables indeed requires a rigorous modelling of the dataset, taking more variables into consideration. In this work, we will be investigating into different machine learning algorithms and comparing the models provided by these algorithms. After a careful evaluation of the fitted models, we will recommend a best model from our perspective.
+
+# Model-Building Approaches
+Before we start working on any procedure, we separate the 17,701 valid observations in $\texttt{Melb.complete}$ into a 9,000-observation training set and a test set, which consists of the rest of the observations. 
+```{r}
+set.seed(131)
+n <- nrow(Melb.complete)
+train.indices <- sample(n, 9000)
+Melb.train <- Melb.complete[train.indices, ]
+Melb.test <- Melb.complete[-train.indices, ]
+Melb.test <- subset(Melb.test, as.character(Car) %in% as.character(0:10))
+# We remove two observations - one house with 11 parking spots and one house 
+# with 18 parking spots. These extreme cases introduces error calculating test
+# MSE.
+```
+
+## Linear Model with All Original Variables
+The analysis starts with a linear regression model, including all the variables.
+```{r}
+model1 <- lm(Price ~., data=Melb.train)
+summary(model1)
+```
+The four diagnostic plots (Figure 3) are listed below. In the Residuals vs. Fitted plot, there appears a clear pattern that nearly all the data are closely around a straight line; this is a sign of heteroscedasticity. In the Q-Q residuals plot, the data points exhibit to be on a curved line instead of a straight line. The Scale-Lication plot provided more insight into how the assumption of homoscedasticity is violated - it should be a horizontal straight line. These evidences all suggest that the model is not that satisfying.
+```{r,echo=FALSE, warning=FALSE}
+par(mfrow = c(2, 2))
+plot(model1) 
+par(mfrow = c(1, 1))
+mtext("Figure 3. Diagnostic Plots for model1", side = 1, outer = TRUE, line = -1)
+```
+There are two potential ways to refine it - the first is to perform variable selection or regularization to optimize the set of predictors and the second is to transform the model into a non-linear model.
+
+## Model Selection
+For the model selection, we are using the forward stepwise selection approach. From $\mathcal{M}_0$ to $\mathcal{M}_8$ (the one we built above), we find the best among all 9 models. We start with $\mathcal{M}_0$. As the $n$ is extremely huge, it is not computationally pragmatic, due to the limitation of computation capacity of our personal computers, to calculate CV-estimated test MSE using the code below. The fact that test MSE can be calculable further undermines the necessity of CV-estimated test MSE.
+$$\texttt{cv(M0, data = Melb.train, criterion = mse, k = 5)}$$
+Instead, we will focus on comparing $C_p$, AIC, BIC, and adjusted $R^2$. More importantly, we will compare the test MSE of the models.
+```{r, cache=TRUE}
+set.seed(1)
+M0 <- lm(Price ~ 1, data=Melb.train)
+```
+Then, we move forward to $\mathcal{M}_1$ and arrive at $\texttt{Rooms}$-only model.
+```{r, results = 'hide', warning=FALSE}
+predictor_names <- c("Rooms", "Method", "Type", "Landsize", "Propertycount", 
+                     "Bathroom", "Car", "Distance")
+r.squared.list <- numeric(8)
+for (i in 1:8) {
+  model.temp <- lm(as.formula(paste("Price ~", predictor_names[i])), 
+                   data = Melb.train)
+  assign(paste0("M1.", i), model.temp)
+  r.squared.list[i] <- summary(model.temp)$r.squared
+}
+which.max(r.squared.list) # M1.1 is the best among all M1's
+M1 <- M1.1
+```
+Using similar code, we can generate $\mathcal{M}_2$,$\dots$,$\mathcal{M}_7$. To simplify this report, we summarize the critical information of those models in Table 2.
+```{r, echo=FALSE, results='hide'}
+predictor_names_2 <- c("Method", "Type", "Landsize", "Propertycount", "Bathroom", "Car", "Distance")
+r.squared.list.2 <- numeric(7)
+for (i in 1:7) {
+  model.temp <- lm(as.formula(paste("Price ~ Rooms +", predictor_names_2[i])), data = Melb.train)
+  assign(paste0("M2.", i), model.temp)
+  r.squared.list.2[i] <- summary(model.temp)$r.squared
+}
+which.max(r.squared.list.2) # M2.7 is the best among all M2's
+M2 <- M2.7
+```
+```{r, echo=FALSE, results='hide'}
+predictor_names_3 <- c("Method", "Type", "Landsize", "Propertycount", "Bathroom", "Car")
+r.squared.list.3 <- numeric(6)
+for (i in 1:6) {
+  model.temp <- lm(as.formula(paste("Price ~ Rooms + Distance + ", predictor_names_3[i])), data = Melb.train)
+  assign(paste0("M3.", i), model.temp)
+  r.squared.list.3[i] <- summary(model.temp)$r.squared
+}
+which.max(r.squared.list.3) # M3.5 is the best among all M3's
+M3 <- M3.5
+```
+```{r, echo=FALSE, results='hide'}
+predictor_names_4 <- c("Method", "Type", "Landsize", "Propertycount", "Car")
+r.squared.list.4 <- numeric(5)
+for (i in 1:5) {
+  model.temp <- lm(as.formula(paste("Price ~ Rooms + Distance + Bathroom + ", predictor_names_4[i])), data = Melb.train)
+  assign(paste0("M4.", i), model.temp)
+  r.squared.list.4[i] <- summary(model.temp)$r.squared
+}
+which.max(r.squared.list.4) # M4.2 is the best among all M4's
+M4 <- M4.2
+```
+```{r, echo=FALSE, results='hide'}
+predictor_names_5 <- c("Method", "Landsize", "Propertycount", "Car")
+r.squared.list.5 <- numeric(4)
+for (i in 1:4) {
+  model.temp <- lm(as.formula(paste("Price ~ Rooms + Distance + Bathroom + Type + ", predictor_names_5[i])), data = Melb.train)
+  assign(paste0("M5.", i), model.temp)
+  r.squared.list.5[i] <- summary(model.temp)$r.squared
+}
+which.max(r.squared.list.5) # M5.1 is the best among all M5's
+M5 <- M5.1
+```
+```{r, echo=FALSE, results='hide'}
+predictor_names_6 <- c("Landsize", "Propertycount", "Car")
+r.squared.list.6 <- numeric(3)
+for (i in 1:3) {
+  model.temp <- lm(as.formula(paste("Price ~ Rooms + Distance + Bathroom + Type + Method + ", predictor_names_6[i])), data = Melb.train)
+  assign(paste0("M6.", i), model.temp)
+  r.squared.list.6[i] <- summary(model.temp)$r.squared
+}
+which.max(r.squared.list.6) # M6.3 is the best among all M6's
+M6 <- M6.3
+```
+```{r, echo=FALSE, results='hide'}
+predictor_names_7 <- c("Landsize", "Propertycount")
+r.squared.list.7 <- numeric(2)
+for (i in 1:2) {
+  model.temp <- lm(as.formula(paste("Price ~ Rooms + Distance + Bathroom + Type + Car + Method + ", predictor_names_7[i])), data = Melb.train)
+  assign(paste0("M7.", i), model.temp)
+  r.squared.list.7[i] <- summary(model.temp)$r.squared
+}
+which.max(r.squared.list.7) # M7.1 is the best among all M6's
+M7 <- M7.1
+```
+
+```{r, warning = FALSE, echo=FALSE}
+AIC <- function(model){return(extractAIC(model, k=2)[2])} # Find AIC
+BIC <- function(model){return(extractAIC(model, k=log(length(model$residuals)))[2])} # Find BIC
+adjR2 <- function(model){summary(model)$adj.r.squared}
+testMSE <- function(model){
+  fHat <- predict(model, newdata = Melb.test)
+  testMSE <- mean((Melb.test$Price - fHat)^2)
+  return(testMSE)
+}
+modelsdata <- data.frame(
+  col1 <- c("M0", "M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8"),
+  col2 <- c("N/A (Null Model)", "Rooms", "Rooms, Distance", "Rooms, Distance, Bathroom", "Rooms, Distance, Bathroom, Type", "Rooms, Distance, Bathroom, Type, Method", "Rooms, Distance, Bathroom, Type, Method, Car", "Rooms, Distance, Bathroom, Type, Car, Method, Landsize", "Rooms, Distance, Bathroom, Type, Car, Method, Landsize, Propertycount"),
+  col3 <- c(ols_mallows_cp(M0, model1), ols_mallows_cp(M1, model1), ols_mallows_cp(M2, model1), ols_mallows_cp(M3, model1), ols_mallows_cp(M4, model1), ols_mallows_cp(M5, model1), ols_mallows_cp(M6, model1), ols_mallows_cp(M7, model1), ols_mallows_cp(model1, model1)),
+  col4 <- c(AIC(M0),AIC(M1),AIC(M2),AIC(M3),AIC(M4),AIC(M5),AIC(M6),AIC(M7),AIC(model1)),
+  col5 <- c(BIC(M0),BIC(M1),BIC(M2),BIC(M3),BIC(M4),BIC(M5),BIC(M6),BIC(M7),BIC(model1)),
+  col6 <- c(adjR2(M0), adjR2(M1), adjR2(M2), adjR2(M3), adjR2(M4), adjR2(M5), adjR2(M6), adjR2(M7), adjR2(model1)),
+  col7 <- c(testMSE(M0), testMSE(M1), testMSE(M2), testMSE(M3), testMSE(M4), testMSE(M5), testMSE(M6), testMSE(M7), testMSE(model1))
+)
+kable(modelsdata, col.name = c("Model", "Predictor", "Cp", "AIC", "BIC", "Adjusted R-Squared", "Test MSE"), caption='Cp, AIC, BIC, Adjusted R-Squared, and Test MSE for Candidate Models M1-M8')
+```
+We plot $C_p$, AIC, BIC, and Adjusted $R^2$ against their candidate models (Figure 4) according to the data in Table 2. The test MSE values are also plotted against the candidate models in Figure 5.\
+```{r,echo=FALSE, message=FALSE, warning = FALSE, results = 'hide'}
+par(mfrow = c(2,2))
+plot(1:9, modelsdata$col3, xaxt = "n", type = "o", col = "blue", xlab = "Model", ylab = "Cp", main = "Cp Values") +
+  axis(1, at=1:9, labels=modelsdata$col1, las=2)
+plot(1:9, modelsdata$col4, xaxt = "n", type = "o", col = "green", xlab = "Model", ylab = "AIC", main = "AIC Values") +
+  axis(1, at=1:9, labels=modelsdata$col1, las=2)
+plot(1:9, modelsdata$col5, xaxt = "n", type = "o", col = "yellow", xlab = "Model", ylab = "BIC", main = "BIC Values") +
+  axis(1, at=1:9, labels=modelsdata$col1, las=2)
+plot(1:9, modelsdata$col6, xaxt = "n", type = "o", col = "red", xlab = "Model", ylab = "Adjusted R^2", main = "Adjusted R^2 Values") +
+  axis(1, at=1:9, labels=modelsdata$col1, las=2)
+par(mfrow = c(1, 1))
+mtext("Figure 4. Cp, AIC, BIC, and Adjusted R-Squared for Candidate Models M1-M8", side = 1, outer = TRUE, line = -1)
+```
+```{r,echo=FALSE, message=FALSE, warning = FALSE, results = 'hide'}
+plot(1:9, modelsdata$col7, xaxt = "n", type = "o", col = "blue", xlab = "Model", ylab = "Test MSE", main = "Test MSE Values") 
+axis(1, at=1:9, labels=modelsdata$col1, las=2)
+mtext("Figure 5. Test MSE Values for Candidate Models M1-M8", side = 1, line = 4, adj = 0.5)
+```
+
+Interpreting from Figure 4, $\mathcal{M}_7$ has the lowest AIC and $C_p$ and the highest adjusted $R^2$, $\mathcal{M}_5$ has the lowest BIC, and $\mathcal{M}_6$ has the low Test MSE. As the accurate prediction is a primary goal, the test MSE has the uttermost importance. $\mathcal{M}_6$ should be the most optimal candidate model from the variable selection process. 
+
+As a recap, we want to present the model $\mathcal{M}_5$ in an equation form. Using a house with 1 bedroom ($\texttt{Rooms}=1$), 0 bathroom, 0 car spot, sold by "Passed In" method as a baseline,
+```{r, echo=FALSE, results='hide'}
+summary(M6)
+```
+$\text{Price} = 1061988.9 + 245357.7\mathbb{I}(\text{Rooms}=2)+ 411055.4\mathbb{I}(\text{Rooms}=3)+619729.7\mathbb{I}(\text{Rooms}=4)+822494.7\mathbb{I}(\text{Rooms}=5)+776482.8\mathbb{I}(\text{Rooms}=6)+397589.2\mathbb{I}(\text{Rooms}=7)+188994.8\mathbb{I}(\text{Rooms}=8)+1686894.1\mathbb{I}(\text{Rooms}=10)-707098.2\mathbb{I}(\text{Rooms}=12)-38624.2\text{Distance}-43718.3\mathbb{I}(\text{Bathroom}=1)+113220.3\mathbb{I}(\text{Bathroom}=2)+434850.0\mathbb{I}(\text{Bathroom}=3)+1101167.2\mathbb{I}(\text{Bathroom}=4)+1454736.1\mathbb{I}(\text{Bathroom}=5)+628757.6\mathbb{I}(\text{Bathroom}=6)+1965456.1\mathbb{I}(\text{Bathroom}=7)+1098550.3\mathbb{I}(\text{Bathroom}=8)-271801.0\mathbb{I}(\text{Type}=t)-372963.8\mathbb{I}(\text{Type}=u)+10554.2\mathbb{I}(\text{Method}=S)+48407.2\mathbb{I}(\text{Method}=SA)-107386.4\mathbb{I}(\text{Method}=SP)+67566.2\mathbb{I}(\text{Method}=VB)-6021.6\mathbb{I}(\text{Car}=1)+75195.4\mathbb{I}(\text{Car}=2)+114207.1\mathbb{I}(\text{Car}=3)+147872.5\mathbb{I}(\text{Car}=4)+263246.5\mathbb{I}(\text{Car}=5)+56364.1\mathbb{I}(\text{Car}=6)+264934.9\mathbb{I}(\text{Car}=7)+444065.6\mathbb{I}(\text{Car}=8)+180837.9\mathbb{I}(\text{Car}=9)+263834.0\mathbb{I}(\text{Car}=10)$
+
+## Regularization
+Here, we use Lasso technique to perform regularization on the model. We still use the original, 8-predictor model as a starting point.
+```{r, cache=TRUE}
+# We use the same train indices, so the observations in the train set for variable selection are still in the train set here.
+dat <- model.matrix(Price ~ ., Melb.complete)[,-1]
+x.train <- dat[train.indices, ]
+y.train <- Melb.complete[train.indices, ]$Price
+x.test <- dat[-train.indices, ]
+y.test <- Melb.complete[-train.indices, ]$Price
+
+lambda.list.lasso = 2 * exp(seq(0, log(1e+3), length = 1000))
+cv.lasso.initial <- cv.glmnet(x.train, y.train, alpha = 1, lambda = lambda.list.lasso, nfolds = 10)
+optimal.lam.lasso <- cv.lasso.initial$lambda.min
+print(optimal.lam.lasso) 
+```
+Here, the ten-fold cross validation produces a $\lambda$ value. We will use that to generate the optimal coefficients for the model.
+```{r}
+final.lasso.model <- glmnet(x.train, y.train, alpha = 1)
+predict(final.lasso.model,type="coefficients",s=optimal.lam.lasso)[1:45,]
+```
+To evaluate the model $\texttt{final.lasso.model}$, we need to calculate its test MSE.
+```{r}
+lasso.pred.test <- predict(final.lasso.model, s=optimal.lam.lasso, newx=x.test)
+mse.test.lasso <- mean((lasso.pred.test - y.test)^2)
+print(mse.test.lasso)
+```
+Since the optimal $\lambda$ is not perfectly fixed, we will not separately report (from the R response) the coefficients and the test MSE.
+
+# Discussion and Conclusion
+Focusing on the two models we build, the one built with variable selection technique tends to have a better prediction on $\texttt{Price}$ as it has a smaller test MSE. The coefficient have real world meanings - although it is redundant to describe the real world meaning of the 35 coefficients one by one, we would like to provide a few examples. The intercept, for example, means a house with 1 bedroom ($\texttt{Rooms}=1$), 0 bathroom, 0 car spot, sold by "Passed In" method, and with a distance of 0 km from Melbourne centeral business district, would cost AU\$1,061,988.9. Compared to 1-bedroom property, holding other variables unchanged, a 3-bedroom property costs AU\$411,055.4 more. This makes sense as a 3-bedroom property, housing more people, indeed carries more value. Also, when the distance to Melbourne central business district increases by 1 km, the price drops AU\$38,624.2. The interpretation of all other 32 coefficients resembles the second example (for numeric variables) or the third one (for categorical variables). \
+
+In summary, based on a linear regression model taking all variables, in this work, we construct two models that can better predict the price of a property using a variety of predictors like its bedrooms and bathrooms, location, and how it is sold. However, we must acknowledge that both the original dataset and our analysis approaches have limitations. \
+
+Firstly, the author of the original dataset oversimplified many aspects of a property. For example, a spacious room with a nice view in the window is not equivalent in value to a small room with a faux window, but they are both counted as one when the realtors record the data. The phenomenon exists a lot in many other variables. \
+
+Secondly, we ought to look for a way to incorporate some more variables in this analysis. One variable that is not considered in this work is $\texttt{Suburb}$. We have solid justification for not considering it: We cannot ensure that each $\texttt{Suburb}$ has enough number of observations that make the model accurate; also, describing the location are other variables, like $\texttt{Propertycount}$ and $\texttt{Distance}$. While we are convinced that these variables can somewhat describe the same thing, what we overlook is the cultural factor that impact people's willingness to buy a property. It is indeed compelling to pay more to buy a house in a neighborhood with people sharing the same cultural background or next to food of some specific cuisines. \
+
+From a technical perspective, we believe that more machine learning algorithms can be tried in this case. For example, in the context of the application of predicting property values, sometimes, although not having excellent predictive accuracy, tree-based methods can give an approximate prediction (and that is all people ask for). Future research work in this direction may provide people a more practical tool.\
+
+
